@@ -23,7 +23,16 @@ public class GraphForm : Form
     // Параметри функції
     private const double X_START = 3.8;
     private const double X_END = 7.6;
-    private const double DX = 0.6;
+    // Видалено фіксований крок DX — точки генеруються залежно від ширини
+
+    // Відступи (в поле, щоб бути доступними для перерахунку та малювання)
+    private int leftMargin = 60;
+    private int bottomMargin = 60;
+    private int topMargin = 40;
+    private int rightMargin = 40;
+
+    // Таймер для дебаунсу перерахунку точок при зміні розміру
+    private Timer resizeTimer;
 
     public GraphForm()
     {
@@ -40,9 +49,14 @@ public class GraphForm : Form
         pictureBox.Paint += PictureBox_Paint;
         pictureBox.Resize += PictureBox_Resize;
 
+        // Ініціалізація таймера для дебаунсу: перерахунок після завершення ресайзу
+        resizeTimer = new Timer();
+        resizeTimer.Interval = 200; // мс
+        resizeTimer.Tick += ResizeTimer_Tick;
+
         this.Controls.Add(pictureBox);
 
-        // Розрахунок точок графіку
+        // Початковий розрахунок точок графіку
         CalculateGraphPoints();
     }
 
@@ -62,8 +76,19 @@ public class GraphForm : Form
     {
         graphPoints = new List<PointF>();
 
-        for (double x = X_START; x <= X_END + 0.001; x += DX)
+        // Визначаємо ширину області графіка у пікселях
+        int graphWidth = Math.Max(100, pictureBox.Width - leftMargin - rightMargin);
+
+        // Кількість точок залежить від ширини: наприклад 1.5 точки на піксель
+        double pointsPerPixel = 1.5; // можна налаштувати (1.0 - 2.0)
+        int N = Math.Max(200, (int)(graphWidth * pointsPerPixel));
+
+        double xRange = X_END - X_START;
+        double step = xRange / (N - 1);
+
+        for (int i = 0; i < N; i++)
         {
+            double x = X_START + i * step;
             double y = CalculateFunction(x);
             graphPoints.Add(new PointF((float)x, (float)y));
         }
@@ -74,6 +99,16 @@ public class GraphForm : Form
     /// </summary>
     private void PictureBox_Resize(object sender, EventArgs e)
     {
+        // Дебаунсим перерахунок точок: запускаємо таймер, який після паузи виконає перерахунок
+        // Це запобігає перерахунку на кожен кадр при активному змінюванні розміру
+        resizeTimer.Stop();
+        resizeTimer.Start();
+    }
+
+    private void ResizeTimer_Tick(object sender, EventArgs e)
+    {
+        resizeTimer.Stop();
+        CalculateGraphPoints();
         pictureBox.Invalidate();
     }
 
@@ -88,12 +123,7 @@ public class GraphForm : Form
         e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
 
-        // Параметри відступів
-        int leftMargin = 60;
-        int bottomMargin = 60;
-        int topMargin = 40;
-        int rightMargin = 40;
-
+        // Параметри відступів (використовуємо поля класу)
         int graphWidth = pictureBox.Width - leftMargin - rightMargin;
         int graphHeight = pictureBox.Height - topMargin - bottomMargin;
 
@@ -124,7 +154,8 @@ public class GraphForm : Form
         }
 
         // Малювання осей координат
-        DrawAxes(e.Graphics, leftMargin, topMargin, graphWidth, graphHeight, minX, maxX, minY, maxY);
+        // Передаємо відступи та розміри графічної області в DrawAxes
+        DrawAxes(e.Graphics, leftMargin, topMargin, rightMargin, bottomMargin, graphWidth, graphHeight, minX, maxX, minY, maxY);
 
         // Малювання графіку
         using (Pen pen = new Pen(Color.DarkBlue, 2.5f))
@@ -151,10 +182,11 @@ public class GraphForm : Form
     /// <summary>
     /// Малює осі координат та сітку
     /// </summary>
-    private void DrawAxes(Graphics g, int leftMargin, int topMargin, int graphWidth, 
+    private void DrawAxes(Graphics g, int leftMargin, int topMargin, int rightMargin, int bottomMargin, int graphWidth, 
                           int graphHeight, float minX, float maxX, float minY, float maxY)
     {
-        int graphBottom = pictureBox.Height - leftMargin;
+        // Використовуємо bottomMargin (а не leftMargin) для обчислення нижньої межі графіку
+        int graphBottom = pictureBox.Height - bottomMargin;
         int graphRight = leftMargin + graphWidth;
 
         using (Pen axisPen = new Pen(Color.Black, 2))
