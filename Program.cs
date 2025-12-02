@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Globalization;
 using System.Windows.Forms;
 
 public class Program
@@ -17,7 +18,7 @@ public class Program
 public class GraphForm : Form
 
 {
-    private PictureBox pictureBox;
+    private GraphPanel pictureBox;
     private List<PointF> graphPoints;
 
     // Параметри функції
@@ -34,6 +35,24 @@ public class GraphForm : Form
     // Таймер для дебаунсу перерахунку точок при зміні розміру
     private Timer resizeTimer;
 
+    // Кеш для відмалювання статичних шарів (осі, сітка, підписи)
+    private Bitmap axesCache;
+    private bool axesCacheValid = false;
+
+    // Ресурси для малювання (створюємо один раз і використовуємо повторно)
+    private readonly Pen axisPen = new Pen(Color.Black, 2);
+    private readonly Pen gridPen = new Pen(Color.LightGray, 1) { DashStyle = System.Drawing.Drawing2D.DashStyle.Dot };
+    private readonly Pen graphPen = new Pen(Color.DarkBlue, 2.5f);
+    private readonly Brush pointBrush = new SolidBrush(Color.Red);
+    private readonly Brush textBrush = new SolidBrush(Color.Black);
+    private readonly Font labelFont = new Font("Arial", 9);
+    private readonly Font axisFont = new Font("Arial", 12, FontStyle.Bold);
+    private readonly Font titleFont = new Font("Arial", 14, FontStyle.Bold);
+
+    // LOD / обмеження точок
+    private const int MaxPoints = 5000;
+    private double pointsPerPixel = 1.5;
+
     public GraphForm()
     {
         this.Text = "Графік функції: y = cos²(x) / (x² + 1)";
@@ -42,8 +61,8 @@ public class GraphForm : Form
         this.StartPosition = FormStartPosition.CenterScreen;
         this.DoubleBuffered = true;
 
-        // Створення PictureBox
-        pictureBox = new PictureBox();
+        // Створення панелі для малювання графіка (оптимізована подвійним буферуванням)
+        pictureBox = new GraphPanel();
         pictureBox.Dock = DockStyle.Fill;
         pictureBox.BackColor = Color.White;
         pictureBox.Paint += PictureBox_Paint;
@@ -76,12 +95,14 @@ public class GraphForm : Form
     {
         graphPoints = new List<PointF>();
 
-        // Визначаємо ширину області графіка у пікселях
-        int graphWidth = Math.Max(100, pictureBox.Width - leftMargin - rightMargin);
+        // Визначаємо ширину області графіка у пікселях (клієнтська зона)
+        int graphWidth = Math.Max(100, pictureBox.ClientSize.Width - leftMargin - rightMargin);
 
-        // Кількість точок залежить від ширини: наприклад 1.5 точки на піксель
-        double pointsPerPixel = 1.5; // можна налаштувати (1.0 - 2.0)
-        int N = Math.Max(200, (int)(graphWidth * pointsPerPixel));
+        // Бажана кількість точок залежить від ширини і налаштування pointsPerPixel
+        int desiredN = Math.Max(200, (int)(graphWidth * pointsPerPixel));
+
+        // Обмежуємо максимальну кількість точок
+        int N = Math.Min(desiredN, MaxPoints);
 
         double xRange = X_END - X_START;
         double step = xRange / (N - 1);
@@ -92,6 +113,9 @@ public class GraphForm : Form
             double y = CalculateFunction(x);
             graphPoints.Add(new PointF((float)x, (float)y));
         }
+
+        // Маркуємо кеш осей як недійсний, щоб його перегенерувати при наступному Paint
+        axesCacheValid = false;
     }
 
     private void PictureBox_Resize(object sender, EventArgs e)
@@ -104,6 +128,8 @@ public class GraphForm : Form
     {
         resizeTimer.Stop();
         CalculateGraphPoints();
+        // Під час зміни розміру відмічаємо, що кеш має бути оновлений
+        axesCacheValid = false;
         pictureBox.Invalidate();
     }
 
@@ -129,10 +155,23 @@ public class GraphForm : Form
             if (point.Y > maxY) maxY = point.Y;
         }
 
-        float yRange = maxY - minY;
-        minY -= yRange * 0.1f;
-        maxY += yRange * 0.1f;
+        // Захист від ділення на нуль: якщо yRange занадто малий — розширюємо діапазон вручну
         float xRange = maxX - minX;
+        float yRange = maxY - minY;
+        const float eps = 1e-6f;
+        if (Math.Abs(yRange) < eps)
+        {
+            // якщо функція практично стала константою, даємо невеликий запас
+            minY -= 0.1f;
+            maxY += 0.1f;
+            yRange = maxY - minY;
+        }
+        else
+        {
+            minY -= yRange * 0.1f;
+            maxY += yRange * 0.1f;
+            yRange = maxY - minY;
+        }
 
         PointF ConvertToScreen(PointF mathPoint)
         {
@@ -141,20 +180,24 @@ public class GraphForm : Form
             return new PointF(screenX, screenY);
         }
 
-        DrawAxes(e.Graphics, leftMargin, topMargin, rightMargin, bottomMargin, graphWidth, graphHeight, minX, maxX, minY, maxY);
-
-
-        using (Pen pen = new Pen(Color.DarkBlue, 2.5f))
+        // Використовуємо кеш для відмалювання осей/сітки/підписів
+        EnsureAxesCache(graphWidth + leftMargin + rightMargin, graphHeight + topMargin + bottomMargin, leftMargin, topMargin, rightMargin, bottomMargin, minX, maxX, minY, maxY);
+        if (axesCache != null)
         {
-            for (int i = 0; i < graphPoints.Count - 1; i++)
-            {
-                PointF screen1 = ConvertToScreen(graphPoints[i]);
-                PointF screen2 = ConvertToScreen(graphPoints[i + 1]);
-                e.Graphics.DrawLine(pen, screen1, screen2);
-            }
+            e.Graphics.DrawImageUnscaled(axesCache, 0, 0);
         }
 
-        using (Brush pointBrush = new SolidBrush(Color.Red))
+        // Малювання графіку: будуємо масив екранних точок і малюємо одним викликом DrawLines
+        int m = graphPoints.Count;
+        if (m >= 2)
+        {
+            PointF[] screenPoints = new PointF[m];
+            for (int i = 0; i < m; i++) screenPoints[i] = ConvertToScreen(graphPoints[i]);
+            e.Graphics.DrawLines(graphPen, screenPoints);
+        }
+
+        // Малюємо точки лише якщо їх небагато (щоб не засмічувати рендер)
+        if (graphPoints.Count <= 1000)
         {
             foreach (var point in graphPoints)
             {
@@ -164,81 +207,159 @@ public class GraphForm : Form
         }
     }
 
+    /// <summary>
+    /// Переконується, що axesCache існує і є актуальним; якщо ні — створює або оновлює його.
+    /// </summary>
+    private void EnsureAxesCache(int width, int height, int leftMargin, int topMargin, int rightMargin, int bottomMargin, float minX, float maxX, float minY, float maxY)
+    {
+        // Якщо кеш валідний і підходить за розміром — нічого не робимо
+        if (axesCacheValid && axesCache != null && axesCache.Width == pictureBox.Width && axesCache.Height == pictureBox.Height)
+            return;
+
+        // Видаляємо старий кеш (якщо є)
+        axesCache?.Dispose();
+
+        // Створюємо новий bitmap розміром клієнтської області
+        axesCache = new Bitmap(Math.Max(1, pictureBox.Width), Math.Max(1, pictureBox.Height));
+
+        using (Graphics g = Graphics.FromImage(axesCache))
+        {
+            g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+            g.Clear(pictureBox.BackColor);
+
+            int graphW = Math.Max(1, pictureBox.ClientSize.Width - leftMargin - rightMargin);
+            int graphH = Math.Max(1, pictureBox.ClientSize.Height - topMargin - bottomMargin);
+            int graphBottom = pictureBox.Height - bottomMargin;
+            int graphRight = leftMargin + graphW;
+
+            // Оси
+            g.DrawLine(axisPen, leftMargin, graphBottom, graphRight, graphBottom);
+            g.DrawLine(axisPen, leftMargin, topMargin, leftMargin, graphBottom);
+
+            // Сітка по X
+            for (double x = Math.Ceiling(minX * 10) / 10; x <= maxX; x += 0.5)
+            {
+                float screenX = leftMargin + (float)((x - minX) / (maxX - minX) * graphW);
+                g.DrawLine(gridPen, screenX, topMargin, screenX, graphBottom);
+            }
+
+            // Сітка по Y
+            float yStep = (maxY - minY) / 10;
+            if (Math.Abs(yStep) < 1e-6f) yStep = 1e-3f;
+            for (float y = minY; y <= maxY; y += yStep)
+            {
+                float screenY = graphBottom - (y - minY) / (maxY - minY) * graphH;
+                g.DrawLine(gridPen, leftMargin, screenY, graphRight, screenY);
+            }
+
+            // Підписи по осях
+            for (double x = Math.Ceiling(minX * 10) / 10; x <= maxX; x += 0.5)
+            {
+                float screenX = leftMargin + (float)((x - minX) / (maxX - minX) * graphW);
+                string label = x.ToString("F1", CultureInfo.CurrentCulture);
+                SizeF labelSize = g.MeasureString(label, labelFont);
+                g.DrawString(label, labelFont, textBrush, screenX - labelSize.Width / 2, graphBottom + 5);
+            }
+
+            for (float y = minY; y <= maxY; y += yStep)
+            {
+                float screenY = graphBottom - (y - minY) / (maxY - minY) * graphH;
+                string label = y.ToString("F3", CultureInfo.CurrentCulture);
+                SizeF labelSize = g.MeasureString(label, labelFont);
+                g.DrawString(label, labelFont, textBrush, leftMargin - labelSize.Width - 5, screenY - labelSize.Height / 2);
+            }
+
+            // Назви осей та заголовок
+            g.DrawString("x", axisFont, textBrush, graphRight + 5, graphBottom - 15);
+            g.DrawString("y", axisFont, textBrush, leftMargin - 25, topMargin - 15);
+            string title = "y = cos²(x) / (x² + 1)";
+            SizeF titleSize = g.MeasureString(title, titleFont);
+            g.DrawString(title, titleFont, Brushes.DarkBlue, (pictureBox.Width - titleSize.Width) / 2, 5);
+        }
+
+        axesCacheValid = true;
+    }
+
     private void DrawAxes(Graphics g, int leftMargin, int topMargin, int rightMargin, int bottomMargin, int graphWidth, 
                           int graphHeight, float minX, float maxX, float minY, float maxY)
     {
         int graphBottom = pictureBox.Height - bottomMargin;
         int graphRight = leftMargin + graphWidth;
 
-        using (Pen axisPen = new Pen(Color.Black, 2))
-        {
-            g.DrawLine(axisPen, leftMargin, graphBottom, graphRight, graphBottom);
+        // Використовуємо повторно створені ресурси axisPen, gridPen та текстові кисті
+        g.DrawLine(axisPen, leftMargin, graphBottom, graphRight, graphBottom);
+        g.DrawLine(axisPen, leftMargin, topMargin, leftMargin, graphBottom);
 
-            g.DrawLine(axisPen, leftMargin, topMargin, leftMargin, graphBottom);
+        for (double x = Math.Ceiling(minX * 10) / 10; x <= maxX; x += 0.5)
+        {
+            float screenX = leftMargin + (float)((x - minX) / (maxX - minX) * graphWidth);
+            g.DrawLine(gridPen, screenX, topMargin, screenX, graphBottom);
         }
 
-        using (Pen gridPen = new Pen(Color.LightGray, 1))
+        float yStep = (maxY - minY) / 10;
+        if (Math.Abs(yStep) < 1e-6f) yStep = 1e-3f;
+        for (float y = minY; y <= maxY; y += yStep)
         {
-            gridPen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dot;
-
-            for (double x = Math.Ceiling(minX * 10) / 10; x <= maxX; x += 0.5)
-            {
-                float screenX = leftMargin + (float)((x - minX) / (maxX - minX) * graphWidth);
-                g.DrawLine(gridPen, screenX, topMargin, screenX, graphBottom);
-            }
-
-            float yStep = (maxY - minY) / 10;
-            for (float y = minY; y <= maxY; y += yStep)
-            {
-                float screenY = graphBottom - (y - minY) / (maxY - minY) * graphHeight;
-                g.DrawLine(gridPen, leftMargin, screenY, graphRight, screenY);
-            }
+            float screenY = graphBottom - (y - minY) / (maxY - minY) * graphHeight;
+            g.DrawLine(gridPen, leftMargin, screenY, graphRight, screenY);
         }
 
-        using (Font labelFont = new Font("Arial", 9))
+        // Підписи по осях
+        for (double x = Math.Ceiling(minX * 10) / 10; x <= maxX; x += 0.5)
         {
-            using (Brush textBrush = new SolidBrush(Color.Black))
-            {
-                for (double x = Math.Ceiling(minX * 10) / 10; x <= maxX; x += 0.5)
-                {
-                    float screenX = leftMargin + (float)((x - minX) / (maxX - minX) * graphWidth);
-                    string label = x.ToString("F1");
-                    SizeF labelSize = g.MeasureString(label, labelFont);
-                    g.DrawString(label, labelFont, textBrush, 
-                        screenX - labelSize.Width / 2, graphBottom + 5);
-                }
-
-                float yStep = (maxY - minY) / 10;
-                for (float y = minY; y <= maxY; y += yStep)
-                {
-                    float screenY = graphBottom - (y - minY) / (maxY - minY) * graphHeight;
-                    string label = y.ToString("F3");
-                    SizeF labelSize = g.MeasureString(label, labelFont);
-                    g.DrawString(label, labelFont, textBrush, 
-                        leftMargin - labelSize.Width - 5, screenY - labelSize.Height / 2);
-                }
-            }
+            float screenX = leftMargin + (float)((x - minX) / (maxX - minX) * graphWidth);
+            string label = x.ToString("F1", CultureInfo.CurrentCulture);
+            SizeF labelSize = g.MeasureString(label, labelFont);
+            g.DrawString(label, labelFont, textBrush, screenX - labelSize.Width / 2, graphBottom + 5);
         }
 
-        using (Font axisFont = new Font("Arial", 12, FontStyle.Bold))
+        for (float y = minY; y <= maxY; y += yStep)
         {
-            using (Brush textBrush = new SolidBrush(Color.Black))
-            {
-                g.DrawString("x", axisFont, textBrush, graphRight + 5, graphBottom - 15);
-
-                g.DrawString("y", axisFont, textBrush, leftMargin - 25, topMargin - 15);
-            }
+            float screenY = graphBottom - (y - minY) / (maxY - minY) * graphHeight;
+            string label = y.ToString("F3", CultureInfo.CurrentCulture);
+            SizeF labelSize = g.MeasureString(label, labelFont);
+            g.DrawString(label, labelFont, textBrush, leftMargin - labelSize.Width - 5, screenY - labelSize.Height / 2);
         }
 
-        using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
+        g.DrawString("x", axisFont, textBrush, graphRight + 5, graphBottom - 15);
+        g.DrawString("y", axisFont, textBrush, leftMargin - 25, topMargin - 15);
+
+        string title = "y = cos²(x) / (x² + 1)";
+        SizeF titleSize = g.MeasureString(title, titleFont);
+        g.DrawString(title, titleFont, Brushes.DarkBlue, (pictureBox.Width - titleSize.Width) / 2, 5);
+    }
+
+    /// <summary>
+    /// Звільнення використовуваних ресурсів
+    /// </summary>
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
         {
-            using (Brush textBrush = new SolidBrush(Color.DarkBlue))
-            {
-                string title = "y = cos²(x) / (x² + 1)";
-                SizeF titleSize = g.MeasureString(title, titleFont);
-                g.DrawString(title, titleFont, textBrush, 
-                    (pictureBox.Width - titleSize.Width) / 2, 5);
-            }
+            axesCache?.Dispose();
+            axisPen?.Dispose();
+            gridPen?.Dispose();
+            graphPen?.Dispose();
+            pointBrush?.Dispose();
+            textBrush?.Dispose();
+            labelFont?.Dispose();
+            axisFont?.Dispose();
+            titleFont?.Dispose();
+            resizeTimer?.Dispose();
         }
+        base.Dispose(disposing);
+    }
+}
+
+/// <summary>
+/// Контрол з оптимізованим подвійним буферуванням для відмалювання графіка.
+/// </summary>
+public class GraphPanel : Panel
+{
+    public GraphPanel()
+    {
+        this.SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint, true);
+        this.UpdateStyles();
+        this.DoubleBuffered = true;
     }
 }
