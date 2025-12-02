@@ -94,13 +94,8 @@ public class GraphForm : Form
         }
     }
 
-    /// <summary>
-    /// Перерисовує графік при зміні розміру вікна
-    /// </summary>
     private void PictureBox_Resize(object sender, EventArgs e)
     {
-        // Дебаунсим перерахунок точок: запускаємо таймер, який після паузи виконає перерахунок
-        // Це запобігає перерахунку на кожен кадр при активному змінюванні розміру
         resizeTimer.Stop();
         resizeTimer.Start();
     }
@@ -112,9 +107,6 @@ public class GraphForm : Form
         pictureBox.Invalidate();
     }
 
-    /// <summary>
-    /// Основна функція для малювання графіку
-    /// </summary>
     private void PictureBox_Paint(object sender, PaintEventArgs e)
     {
         if (graphPoints == null || graphPoints.Count == 0)
@@ -123,11 +115,9 @@ public class GraphForm : Form
         e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
         e.Graphics.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
 
-        // Параметри відступів (використовуємо поля класу)
         int graphWidth = pictureBox.Width - leftMargin - rightMargin;
         int graphHeight = pictureBox.Height - topMargin - bottomMargin;
 
-        // Знайти мин/макс значення функції для масштабування
         float minY = float.MaxValue;
         float maxY = float.MinValue;
         float minX = (float)X_START;
@@ -139,13 +129,11 @@ public class GraphForm : Form
             if (point.Y > maxY) maxY = point.Y;
         }
 
-        // Додати невеликий запас до масштабування
         float yRange = maxY - minY;
         minY -= yRange * 0.1f;
         maxY += yRange * 0.1f;
         float xRange = maxX - minX;
 
-        // Функція конвертації координат з математичних у екранні
         PointF ConvertToScreen(PointF mathPoint)
         {
             float screenX = leftMargin + (mathPoint.X - minX) / xRange * graphWidth;
@@ -153,11 +141,9 @@ public class GraphForm : Form
             return new PointF(screenX, screenY);
         }
 
-        // Малювання осей координат
-        // Передаємо відступи та розміри графічної області в DrawAxes
         DrawAxes(e.Graphics, leftMargin, topMargin, rightMargin, bottomMargin, graphWidth, graphHeight, minX, maxX, minY, maxY);
 
-        // Малювання графіку
+
         using (Pen pen = new Pen(Color.DarkBlue, 2.5f))
         {
             for (int i = 0; i < graphPoints.Count - 1; i++)
@@ -168,7 +154,6 @@ public class GraphForm : Form
             }
         }
 
-        // Малювання точок на графіку
         using (Brush pointBrush = new SolidBrush(Color.Red))
         {
             foreach (var point in graphPoints)
@@ -179,22 +164,16 @@ public class GraphForm : Form
         }
     }
 
-    /// <summary>
-    /// Малює осі координат та сітку
-    /// </summary>
     private void DrawAxes(Graphics g, int leftMargin, int topMargin, int rightMargin, int bottomMargin, int graphWidth, 
                           int graphHeight, float minX, float maxX, float minY, float maxY)
     {
-        // Використовуємо bottomMargin (а не leftMargin) для обчислення нижньої межі графіку
         int graphBottom = pictureBox.Height - bottomMargin;
         int graphRight = leftMargin + graphWidth;
 
         using (Pen axisPen = new Pen(Color.Black, 2))
         {
-            // Вісь X
             g.DrawLine(axisPen, leftMargin, graphBottom, graphRight, graphBottom);
 
-            // Вісь Y
             g.DrawLine(axisPen, leftMargin, topMargin, leftMargin, graphBottom);
         }
 
@@ -202,14 +181,12 @@ public class GraphForm : Form
         {
             gridPen.DashStyle = System.Drawing.Drawing2D.DashStyle.Dot;
 
-            // Сітка по X
             for (double x = Math.Ceiling(minX * 10) / 10; x <= maxX; x += 0.5)
             {
                 float screenX = leftMargin + (float)((x - minX) / (maxX - minX) * graphWidth);
                 g.DrawLine(gridPen, screenX, topMargin, screenX, graphBottom);
             }
 
-            // Сітка по Y
             float yStep = (maxY - minY) / 10;
             for (float y = minY; y <= maxY; y += yStep)
             {
@@ -222,7 +199,6 @@ public class GraphForm : Form
         {
             using (Brush textBrush = new SolidBrush(Color.Black))
             {
-                // Позначки по осі X
                 for (double x = Math.Ceiling(minX * 10) / 10; x <= maxX; x += 0.5)
                 {
                     float screenX = leftMargin + (float)((x - minX) / (maxX - minX) * graphWidth);
@@ -232,7 +208,6 @@ public class GraphForm : Form
                         screenX - labelSize.Width / 2, graphBottom + 5);
                 }
 
-                // Позначки по осі Y
                 float yStep = (maxY - minY) / 10;
                 for (float y = minY; y <= maxY; y += yStep)
                 {
@@ -245,20 +220,16 @@ public class GraphForm : Form
             }
         }
 
-        // Написи осей
         using (Font axisFont = new Font("Arial", 12, FontStyle.Bold))
         {
             using (Brush textBrush = new SolidBrush(Color.Black))
             {
-                // Напис осі X
                 g.DrawString("x", axisFont, textBrush, graphRight + 5, graphBottom - 15);
 
-                // Напис осі Y
                 g.DrawString("y", axisFont, textBrush, leftMargin - 25, topMargin - 15);
             }
         }
 
-        // Заголовок
         using (Font titleFont = new Font("Arial", 14, FontStyle.Bold))
         {
             using (Brush textBrush = new SolidBrush(Color.DarkBlue))
